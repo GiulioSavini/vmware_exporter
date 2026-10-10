@@ -1187,11 +1187,12 @@ class VmwareCollector():
 
                 for metric_name in self._metricNames.get(metric_type, []):
                     metric = metrics.get(metric_name)
-                    labelnames = metric._labelnames
-                    metric._labelnames = labelnames[0:len(self._labelNames[metric_type])]
-                    metric._labelnames += customAttributesLabelNames
-                    metric._labelnames += labelnames[len(self._labelNames[metric_type]):]
-                    metric._labelnames = list(map(lambda x: re.sub('[^a-zA-Z0-9_]', '_', x), metric._labelnames))
+                    # prometheus_client stores _labelnames as a tuple since 0.x; build
+                    # the new sequence explicitly instead of concatenating onto it
+                    labelnames = list(metric._labelnames)
+                    split = len(self._labelNames[metric_type])
+                    labelnames = labelnames[:split] + list(customAttributesLabelNames) + labelnames[split:]
+                    metric._labelnames = tuple(re.sub('[^a-zA-Z0-9_]', '_', x) for x in labelnames)
 
     @defer.inlineCallbacks
     def _vmware_get_datastores(self, ds_metrics):
@@ -1706,6 +1707,19 @@ class VmwareCollector():
 
             sensors = [s for s in sensors if ':' in s]
 
+            # vSphere can report the same sensor more than once (e.g. a software
+            # component listed twice). Emitting it twice gives Prometheus two
+            # samples with identical labels, which it drops with a warning. Keep
+            # the first one per metric/label set. See #398.
+            emitted_sensor_samples = set()
+
+            def add_sensor_sample(metric_name, sample_labels, value):
+                key = (metric_name, tuple(sample_labels))
+                if key in emitted_sensor_samples:
+                    return
+                emitted_sensor_samples.add(key)
+                host_metrics[metric_name].add_metric(sample_labels, value)
+
             for s in sensors:
                 sensor = dict(item.split("=") for item in re.split(r':(?=\w+=)', s)[1:])
 
@@ -1719,49 +1733,56 @@ class VmwareCollector():
                     'unknown': 3,
                 }[sensor['sensorStatus'].lower()]
 
-                host_metrics['vmware_host_sensor_state'].add_metric(
+                add_sensor_sample(
+                    'vmware_host_sensor_state',
                     labels + [sensor['name'], sensor['type']],
                     sensor_status
                 )
 
                 # FAN speed
                 if sensor["unit"] == 'rpm':
-                    host_metrics['vmware_host_sensor_fan'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_fan',
                         labels + [sensor['name']],
                         int(sensor['value']) * (10 ** (int(sensor['unitModifier'])))
                     )
 
                 # Temperature
                 if sensor["unit"] == 'degrees c':
-                    host_metrics['vmware_host_sensor_temperature'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_temperature',
                         labels + [sensor['name']],
                         int(sensor['value']) * (10 ** (int(sensor['unitModifier'])))
                     )
 
                 # Power Voltage
                 if sensor["unit"] == 'volts':
-                    host_metrics['vmware_host_sensor_power_voltage'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_power_voltage',
                         labels + [sensor['name']],
                         int(sensor['value']) * (10 ** (int(sensor['unitModifier'])))
                     )
 
                 # Power Current
                 if sensor["unit"] == 'amps':
-                    host_metrics['vmware_host_sensor_power_current'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_power_current',
                         labels + [sensor['name']],
                         int(sensor['value']) * (10 ** (int(sensor['unitModifier'])))
                     )
 
                 # Power Watt
                 if sensor["unit"] == 'watts':
-                    host_metrics['vmware_host_sensor_power_watt'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_power_watt',
                         labels + [sensor['name']],
                         int(sensor['value']) * (10 ** (int(sensor['unitModifier'])))
                     )
 
                 # Redundancy
                 if sensor["unit"] == 'redundancy-discrete':
-                    host_metrics['vmware_host_sensor_redundancy'].add_metric(
+                    add_sensor_sample(
+                        'vmware_host_sensor_redundancy',
                         labels + [sensor['name']],
                         int(sensor['value'])
                     )
